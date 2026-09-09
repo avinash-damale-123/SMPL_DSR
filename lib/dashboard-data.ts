@@ -447,7 +447,7 @@ export async function getDashboardData(): Promise<DashboardData> {
 
   for (const branch of branches) {
     const monthlyRows = readMonthlySheet(workbook, branch);
-    const dsrRows = readDsrSheet(workbook, branch).filter(isOnOrBeforeToday);
+    const dsrRows = readDsrSheet(workbook, branch).filter((row) => isOnOrBeforeToday(row.date));
     monthlyByBranch.set(branch, monthlyRows);
     dsrByBranch.set(branch, dsrRows);
     allMonthlyRows.push(...monthlyRows);
