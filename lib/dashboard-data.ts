@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 const DEFAULT_SHEET_URL =
   "https://docs.google.com/spreadsheets/d/e/2PACX-1vSGoXmsHe0Ad9PgtTO0m_8vszvPxIjAgSpO4tkR4xgS_Fc6Y0XTLDGSN6-3N8M10iXXvaOkINaB_554/pub?output=xlsx";
 
-const SERVICES = [
+export const SERVICES = [
   "Air",
   "Car",
   "Hotel",
@@ -14,7 +14,7 @@ const SERVICES = [
   "Other",
 ] as const;
 
-const MONTHS = [
+export const MONTHS = [
   "Jan",
   "Feb",
   "Mar",
@@ -77,14 +77,45 @@ export type DashboardSnapshot = {
   services: ServiceSummary[];
 };
 
+export type DailyActivity = {
+  branch: Branch;
+  date: string;
+  year: number;
+  month: string;
+  monthNumber: number;
+  services: Record<string, MetricPair>;
+  totalSales: number;
+  totalCount: number;
+};
+
+export type MonthlyPerformance = {
+  branch: Branch;
+  year: number;
+  month: string;
+  monthNumber: number;
+  actual: MetricPair;
+  previous: MetricPair;
+  target: MetricPair;
+  salesAchievementPct: number | null;
+  countAchievementPct: number | null;
+  dataThrough: string | null;
+  actualBasis: string;
+};
+
 export type DashboardData = {
   generatedAt: string;
   source: string;
   branches: Branch[];
+  years: number[];
   months: string[];
   defaultBranch: Branch;
+  defaultYear: number;
   defaultMonth: string;
+  operationalYear: number;
+  operationalMonth: string;
   snapshots: Record<string, DashboardSnapshot>;
+  dailyActivity: DailyActivity[];
+  monthlyPerformance: MonthlyPerformance[];
 };
 
 type MonthlyRow = {
@@ -116,16 +147,24 @@ function num(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function normalizeDate(year: number, monthIndex: number, day: number): Date {
+  return new Date(Date.UTC(year, monthIndex, day));
+}
+
 function parseDate(value: unknown): Date | null {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return normalizeDate(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
+  }
   if (typeof value === "number") {
     const decoded = XLSX.SSF.parse_date_code(value);
     if (!decoded) return null;
-    return new Date(Date.UTC(decoded.y, decoded.m - 1, decoded.d));
+    return normalizeDate(decoded.y, decoded.m - 1, decoded.d);
   }
   if (typeof value === "string" && value.trim()) {
     const parsed = new Date(value);
-    if (!Number.isNaN(parsed.getTime())) return parsed;
+    if (!Number.isNaN(parsed.getTime())) {
+      return normalizeDate(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate());
+    }
   }
   return null;
 }
@@ -133,6 +172,7 @@ function parseDate(value: unknown): Date | null {
 function readMonthlySheet(workbook: XLSX.WorkBook, branch: Branch): MonthlyRow[] {
   const sheet = workbook.Sheets[branch];
   if (!sheet) return [];
+
   const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
     header: 1,
     range: 2,
@@ -154,12 +194,18 @@ function readMonthlySheet(workbook: XLSX.WorkBook, branch: Branch): MonthlyRow[]
       countCurrent: num(row[9]),
       targetCount: num(row[10]),
     }))
-    .filter((row) => row.year > 0 && MONTHS.includes(row.month as (typeof MONTHS)[number]));
+    .filter(
+      (row) =>
+        row.year > 0 &&
+        MONTHS.includes(row.month as (typeof MONTHS)[number]) &&
+        SERVICES.includes(row.service as (typeof SERVICES)[number]),
+    );
 }
 
 function readDsrSheet(workbook: XLSX.WorkBook, branch: Branch): DsrRow[] {
   const sheet = workbook.Sheets[`${branch}_DSR`];
   if (!sheet) return [];
+
   const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
     header: 1,
     range: 3,
@@ -181,13 +227,17 @@ function readDsrSheet(workbook: XLSX.WorkBook, branch: Branch): DsrRow[] {
       };
     });
 
+    const calculatedTotal = sumPairs(Object.values(values));
+    const enteredSales = num(row[18]);
+    const enteredCount = num(row[19]);
+
     return [
       {
         branch,
         date,
         values,
-        totalSales: num(row[18]),
-        totalCount: num(row[19]),
+        totalSales: enteredSales || calculatedTotal.sales,
+        totalCount: enteredCount || calculatedTotal.count,
       },
     ];
   });
@@ -212,6 +262,12 @@ function formatIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+function isOnOrBeforeToday(date: Date): boolean {
+  const now = new Date();
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return date.getTime() <= today;
+}
+
 function monthlyMetric(
   rows: MonthlyRow[],
   year: number,
@@ -231,7 +287,7 @@ function monthlyMetric(
 function dsrMetric(rows: DsrRow[], year: number, monthNumber: number): MetricPair {
   return sumPairs(
     rows
-      .filter((row) => row.date.getFullYear() === year && row.date.getMonth() === monthNumber)
+      .filter((row) => row.date.getUTCFullYear() === year && row.date.getUTCMonth() === monthNumber)
       .map((row) => ({ sales: row.totalSales, count: row.totalCount })),
   );
 }
@@ -239,8 +295,8 @@ function dsrMetric(rows: DsrRow[], year: number, monthNumber: number): MetricPai
 function hasDsrActivity(rows: DsrRow[], year: number, monthNumber: number): boolean {
   return rows.some(
     (row) =>
-      row.date.getFullYear() === year &&
-      row.date.getMonth() === monthNumber &&
+      row.date.getUTCFullYear() === year &&
+      row.date.getUTCMonth() === monthNumber &&
       (row.totalSales !== 0 || row.totalCount !== 0),
   );
 }
@@ -272,7 +328,9 @@ function serviceSummaryForMonth(
     const dsr = useDsr
       ? sumPairs(
           dsrRows
-            .filter((row) => row.date.getFullYear() === year && row.date.getMonth() === index)
+            .filter(
+              (row) => row.date.getUTCFullYear() === year && row.date.getUTCMonth() === index,
+            )
             .map((row) => row.values[service] ?? { sales: 0, count: 0 }),
         )
       : null;
@@ -300,28 +358,39 @@ function buildSnapshot(
   const monthsToDate = MONTHS.slice(0, selectedMonthIndex + 1);
 
   const currentYtd = sumPairs(
-    monthsToDate.map((m) => currentMetricForMonth(monthlyRows, dsrRows, year, m)),
+    monthsToDate.map((item) => currentMetricForMonth(monthlyRows, dsrRows, year, item)),
   );
   const previousYtd = sumPairs(
-    monthsToDate.map((m) => monthlyMetric(monthlyRows, year, m, "previous")),
+    monthsToDate.map((item) => monthlyMetric(monthlyRows, year, item, "previous")),
   );
   const targetYtd = sumPairs(
-    monthsToDate.map((m) => monthlyMetric(monthlyRows, year, m, "target")),
+    monthsToDate.map((item) => monthlyMetric(monthlyRows, year, item, "target")),
   );
 
   const currentMonth = currentMetricForMonth(monthlyRows, dsrRows, year, month);
   const previousMonth = monthlyMetric(monthlyRows, year, month, "previous");
   const targetMonth = monthlyMetric(monthlyRows, year, month, "target");
 
-  const activeRows = dsrRows
+  const monthActiveRows = dsrRows
     .filter(
       (row) =>
-        row.date.getFullYear() === year &&
-        row.date.getMonth() === selectedMonthIndex &&
+        row.date.getUTCFullYear() === year &&
+        row.date.getUTCMonth() === selectedMonthIndex &&
         (row.totalSales !== 0 || row.totalCount !== 0),
     )
     .sort((a, b) => b.date.getTime() - a.date.getTime());
-  const latest = activeRows[0] ?? null;
+
+  const latestEligibleRows = dsrRows
+    .filter(
+      (row) =>
+        row.date.getUTCFullYear() === year &&
+        row.date.getUTCMonth() <= selectedMonthIndex &&
+        (row.totalSales !== 0 || row.totalCount !== 0),
+    )
+    .sort((a, b) => b.date.getTime() - a.date.getTime());
+
+  const dataThroughRow = monthActiveRows[0] ?? null;
+  const latest = latestEligibleRows[0] ?? null;
   const useDsr = selectedMonthIndex >= 0 && hasDsrActivity(dsrRows, year, selectedMonthIndex);
 
   return {
@@ -329,7 +398,7 @@ function buildSnapshot(
     year,
     month,
     monthNumber: selectedMonthIndex + 1,
-    dataThrough: latest ? formatIsoDate(latest.date) : null,
+    dataThrough: dataThroughRow ? formatIsoDate(dataThroughRow.date) : null,
     actualBasis: useDsr
       ? `${month} ${year} actuals are calculated from daily ${branch}_DSR entries.`
       : `${month} ${year} actuals use the fixed monthly aggregate in ${branch}.`,
@@ -358,6 +427,10 @@ function buildSnapshot(
   };
 }
 
+export function snapshotKey(branch: Branch, year: number, month: string): string {
+  return `${branch}-${year}-${month}`;
+}
+
 export async function getDashboardData(): Promise<DashboardData> {
   const source = process.env.SMPL_SHEET_XLSX_URL || DEFAULT_SHEET_URL;
   const response = await fetch(source, { next: { revalidate: 300 } });
@@ -367,33 +440,98 @@ export async function getDashboardData(): Promise<DashboardData> {
   const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
   const snapshots: Record<string, DashboardSnapshot> = {};
   const branches: Branch[] = ["EUC", "SML"];
+  const monthlyByBranch = new Map<Branch, MonthlyRow[]>();
+  const dsrByBranch = new Map<Branch, DsrRow[]>();
+  const allMonthlyRows: MonthlyRow[] = [];
+  const allDsrRows: DsrRow[] = [];
 
   for (const branch of branches) {
     const monthlyRows = readMonthlySheet(workbook, branch);
-    const dsrRows = readDsrSheet(workbook, branch);
-    const years = monthlyRows.map((row) => row.year).filter(Boolean);
-    const year = years.length ? Math.max(...years) : 2026;
+    const dsrRows = readDsrSheet(workbook, branch).filter(isOnOrBeforeToday);
+    monthlyByBranch.set(branch, monthlyRows);
+    dsrByBranch.set(branch, dsrRows);
+    allMonthlyRows.push(...monthlyRows);
+    allDsrRows.push(...dsrRows);
+  }
 
-    for (const month of MONTHS) {
-      snapshots[`${branch}-${month}`] = buildSnapshot(
-        branch,
-        monthlyRows,
-        dsrRows,
-        year,
-        month,
-      );
+  const years = [...new Set(allMonthlyRows.map((row) => row.year).filter(Boolean))].sort(
+    (a, b) => a - b,
+  );
+  if (!years.length) years.push(new Date().getUTCFullYear());
+
+  for (const branch of branches) {
+    const monthlyRows = monthlyByBranch.get(branch) ?? [];
+    const dsrRows = dsrByBranch.get(branch) ?? [];
+    for (const year of years) {
+      for (const month of MONTHS) {
+        snapshots[snapshotKey(branch, year, month)] = buildSnapshot(
+          branch,
+          monthlyRows,
+          dsrRows,
+          year,
+          month,
+        );
+      }
     }
   }
 
-  const defaultMonth = "Sep";
+  const now = new Date();
+  const currentYear = now.getUTCFullYear();
+  const operationalYear = years.includes(currentYear)
+    ? currentYear
+    : [...years].reverse().find((year) => year <= currentYear) ?? years[years.length - 1];
+  const operationalMonth =
+    operationalYear === currentYear ? MONTHS[now.getUTCMonth()] : MONTHS[MONTHS.length - 1];
+
+  const dailyActivity: DailyActivity[] = allDsrRows
+    .filter((row) => row.totalSales !== 0 || row.totalCount !== 0)
+    .map((row) => ({
+      branch: row.branch,
+      date: formatIsoDate(row.date),
+      year: row.date.getUTCFullYear(),
+      month: MONTHS[row.date.getUTCMonth()],
+      monthNumber: row.date.getUTCMonth() + 1,
+      services: row.values,
+      totalSales: row.totalSales,
+      totalCount: row.totalCount,
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const monthlyPerformance: MonthlyPerformance[] = [];
+  for (const branch of branches) {
+    for (const year of years) {
+      for (const month of MONTHS) {
+        const snapshot = snapshots[snapshotKey(branch, year, month)];
+        monthlyPerformance.push({
+          branch,
+          year,
+          month,
+          monthNumber: snapshot.monthNumber,
+          actual: snapshot.monthMetrics.current,
+          previous: snapshot.monthMetrics.previous,
+          target: snapshot.monthMetrics.target,
+          salesAchievementPct: snapshot.achievement.monthSalesPct,
+          countAchievementPct: snapshot.achievement.monthCountPct,
+          dataThrough: snapshot.dataThrough,
+          actualBasis: snapshot.actualBasis,
+        });
+      }
+    }
+  }
 
   return {
     generatedAt: new Date().toISOString(),
     source,
     branches,
+    years,
     months: [...MONTHS],
     defaultBranch: "EUC",
-    defaultMonth,
+    defaultYear: operationalYear,
+    defaultMonth: operationalMonth,
+    operationalYear,
+    operationalMonth,
     snapshots,
+    dailyActivity,
+    monthlyPerformance,
   };
 }
