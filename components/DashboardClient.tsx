@@ -1,7 +1,15 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
-import type { Branch, DashboardData, DashboardSnapshot, MetricPair } from "@/lib/dashboard-data";
+import {
+  snapshotKey,
+  type Branch,
+  type DashboardData,
+  type DashboardSnapshot,
+  type MetricPair,
+  type ServiceSummary,
+} from "@/lib/dashboard-data";
 
 const formatInr = (value: number) =>
   new Intl.NumberFormat("en-IN", {
@@ -17,210 +25,251 @@ const formatPct = (value: number | null) => (value === null ? "—" : `${value.t
 
 const formatDate = (value: string | null) => {
   if (!value) return "No DSR activity";
-  const date = new Date(`${value}T00:00:00`);
+  const date = new Date(`${value}T00:00:00Z`);
   return new Intl.DateTimeFormat("en-GB", {
     day: "2-digit",
     month: "short",
     year: "numeric",
+    timeZone: "UTC",
   }).format(date);
 };
 
-function MetricCard({
-  title,
-  pair,
-  accent,
-  note,
-}: {
-  title: string;
-  pair: MetricPair;
-  accent?: boolean;
-  note?: string;
-}) {
-  return (
-    <article className={`metric-card ${accent ? "metric-card-accent" : ""}`}>
-      <p className="metric-label">{title}</p>
-      <p className="metric-value">{formatInr(pair.sales)}</p>
-      <p className="metric-caption">Sales</p>
-      <div className="metric-divider" />
-      <p className="metric-count">{formatCount(pair.count)}</p>
-      <p className="metric-caption">Transactions</p>
-      {note ? <p className="metric-note">{note}</p> : null}
-    </article>
+function addPairs(...pairs: MetricPair[]): MetricPair {
+  return pairs.reduce(
+    (acc, pair) => ({ sales: acc.sales + pair.sales, count: acc.count + pair.count }),
+    { sales: 0, count: 0 },
   );
 }
 
-function AchievementCard({
-  title,
-  salesPct,
-  countPct,
+function ratio(actual: number, target: number): number | null {
+  return target > 0 ? (actual / target) * 100 : null;
+}
+
+function combineServices(rows: ServiceSummary[][]): ServiceSummary[] {
+  const map = new Map<string, ServiceSummary>();
+  for (const list of rows) {
+    for (const item of list) {
+      const current = map.get(item.service) ?? {
+        service: item.service,
+        actualSales: 0,
+        actualCount: 0,
+        previousSales: 0,
+        previousCount: 0,
+        targetSales: 0,
+        targetCount: 0,
+      };
+      current.actualSales += item.actualSales;
+      current.actualCount += item.actualCount;
+      current.previousSales += item.previousSales;
+      current.previousCount += item.previousCount;
+      current.targetSales += item.targetSales;
+      current.targetCount += item.targetCount;
+      map.set(item.service, current);
+    }
+  }
+  return [...map.values()];
+}
+
+function MultiSelect<T extends string | number>({
+  label,
+  values,
+  options,
+  onChange,
+  renderOption,
 }: {
-  title: string;
-  salesPct: number | null;
-  countPct: number | null;
+  label: string;
+  values: T[];
+  options: T[];
+  onChange: (values: T[]) => void;
+  renderOption?: (value: T) => string;
 }) {
-  const progress = Math.max(0, Math.min(salesPct ?? 0, 100));
   return (
-    <article className="achievement-card">
-      <div className="achievement-topline">
-        <p className="metric-label">{title}</p>
-        <strong>{formatPct(salesPct)}</strong>
-      </div>
-      <div className="progress-track" aria-hidden="true">
-        <span style={{ width: `${progress}%` }} />
-      </div>
-      <div className="achievement-stats">
-        <span>Sales target</span>
-        <strong>{formatPct(salesPct)}</strong>
-        <span>Count target</span>
-        <strong>{formatPct(countPct)}</strong>
-      </div>
-    </article>
+    <label className="filter-control">
+      <span>{label}</span>
+      <select
+        multiple
+        value={values.map(String)}
+        onChange={(event) => {
+          const selected = Array.from(event.currentTarget.selectedOptions).map((option) => option.value);
+          const typed = options.filter((option) => selected.includes(String(option)));
+          onChange(typed.length ? typed : options);
+        }}
+      >
+        {options.map((option) => (
+          <option key={String(option)} value={String(option)}>
+            {renderOption ? renderOption(option) : String(option)}
+          </option>
+        ))}
+      </select>
+      <small>{values.length === options.length ? "All selected" : `${values.length} selected`}</small>
+    </label>
   );
 }
 
-function snapshotKey(branch: Branch, month: string) {
-  return `${branch}-${month}`;
+function KpiTile({ title, sales, count, note }: { title: string; sales: number; count: number; note?: string }) {
+  return (
+    <article className="compact-kpi">
+      <p>{title}</p>
+      <strong>{formatInr(sales)}</strong>
+      <span>{formatCount(count)} transactions</span>
+      {note ? <small>{note}</small> : null}
+    </article>
+  );
 }
 
 export default function DashboardClient({ data }: { data: DashboardData }) {
-  const [branch, setBranch] = useState<Branch>(data.defaultBranch);
-  const [month, setMonth] = useState(data.defaultMonth);
+  const [branches, setBranches] = useState<Branch[]>([...data.branches]);
+  const [years, setYears] = useState<number[]>([data.defaultYear]);
+  const [months, setMonths] = useState<string[]>([data.defaultMonth]);
 
-  const snapshot: DashboardSnapshot = useMemo(
-    () => data.snapshots[snapshotKey(branch, month)],
-    [branch, month, data.snapshots],
-  );
+  const operational = useMemo(() => {
+    const snapshots = data.branches
+      .map((branch) => data.snapshots[snapshotKey(branch, data.operationalYear, data.operationalMonth)])
+      .filter(Boolean);
+
+    const ytdCurrent = addPairs(...snapshots.map((item) => item.ytd.current));
+    const ytdPrevious = addPairs(...snapshots.map((item) => item.ytd.previous));
+    const ytdTarget = addPairs(...snapshots.map((item) => item.ytd.target));
+    const mtdCurrent = addPairs(...snapshots.map((item) => item.monthMetrics.current));
+    const mtdPrevious = addPairs(...snapshots.map((item) => item.monthMetrics.previous));
+    const mtdTarget = addPairs(...snapshots.map((item) => item.monthMetrics.target));
+
+    const latest = data.dailyActivity
+      .filter((row) => row.year === data.operationalYear)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+
+    return {
+      ytdCurrent,
+      ytdPrevious,
+      ytdTarget,
+      mtdCurrent,
+      mtdPrevious,
+      mtdTarget,
+      latest,
+    };
+  }, [data]);
+
+  const selectedSnapshots = useMemo(() => {
+    const result: DashboardSnapshot[] = [];
+    for (const branch of branches) {
+      for (const year of years) {
+        for (const month of months) {
+          const snapshot = data.snapshots[snapshotKey(branch, year, month)];
+          if (snapshot) result.push(snapshot);
+        }
+      }
+    }
+    return result;
+  }, [branches, years, months, data.snapshots]);
+
+  const selected = useMemo(() => {
+    const actual = addPairs(...selectedSnapshots.map((item) => item.monthMetrics.current));
+    const previous = addPairs(...selectedSnapshots.map((item) => item.monthMetrics.previous));
+    const target = addPairs(...selectedSnapshots.map((item) => item.monthMetrics.target));
+    const services = combineServices(selectedSnapshots.map((item) => item.services));
+
+    return {
+      actual,
+      previous,
+      target,
+      services,
+      salesAchievement: ratio(actual.sales, target.sales),
+      countAchievement: ratio(actual.count, target.count),
+    };
+  }, [selectedSnapshots]);
 
   return (
-    <main className="page-shell">
-      <section className="hero-panel">
+    <main className="page-shell compact-shell">
+      <header className="topbar">
         <div>
           <p className="eyebrow">SMPL · Sales & DSR</p>
           <h1>Performance Dashboard</h1>
-          <p className="hero-copy">
-            EUC and SML sales, transaction counts, targets and DSR-driven current-period performance in INR.
-          </p>
         </div>
-        <div className="status-pill">
-          <span className="status-dot" />
-          Workbook refresh: 5 min
-        </div>
-      </section>
+        <nav className="page-nav">
+          <Link className="nav-link active" href="/">Dashboard</Link>
+          <Link className="nav-link" href="/sales-analysis">Sales Analysis</Link>
+        </nav>
+      </header>
 
-      <section className="filter-bar" aria-label="Dashboard filters">
-        <label>
-          <span>Branch</span>
-          <select value={branch} onChange={(event) => setBranch(event.target.value as Branch)}>
-            {data.branches.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>Month</span>
-          <select value={month} onChange={(event) => setMonth(event.target.value)}>
-            {data.months.map((item) => (
-              <option key={item} value={item}>
-                {item} {snapshot?.year ?? 2026}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="data-note">
-          <span>Selected actual basis</span>
-          <strong>{snapshot.actualBasis}</strong>
-        </div>
-        <div className="data-note">
-          <span>Latest DSR activity</span>
-          <strong>{formatDate(snapshot.dataThrough)}</strong>
-        </div>
-      </section>
-
-      <section className="section-block">
-        <div className="section-heading">
+      <section className="operational-strip">
+        <div className="strip-heading">
           <div>
-            <p className="eyebrow">Year to date</p>
-            <h2>YTD Performance</h2>
+            <span>Fixed operational view</span>
+            <strong>{data.operationalMonth} {data.operationalYear} · EUC + SML</strong>
           </div>
-          <p>2025 and target figures include the full selected month because daily breakup is not available.</p>
+          <small>These cards do not change when filters are applied.</small>
         </div>
-        <div className="metrics-grid metrics-grid-four">
-          <MetricCard title={`${snapshot.year} Actual YTD`} pair={snapshot.ytd.current} accent />
-          <MetricCard title={`${snapshot.year - 1} YTD`} pair={snapshot.ytd.previous} />
-          <MetricCard title={`${snapshot.year} Target YTD`} pair={snapshot.ytd.target} />
-          <AchievementCard
-            title="YTD Achievement"
-            salesPct={snapshot.achievement.ytdSalesPct}
-            countPct={snapshot.achievement.ytdCountPct}
+        <div className="compact-kpi-grid">
+          <KpiTile title="YTD Actual" sales={operational.ytdCurrent.sales} count={operational.ytdCurrent.count} />
+          <KpiTile title="YTD Previous Year" sales={operational.ytdPrevious.sales} count={operational.ytdPrevious.count} />
+          <KpiTile title="YTD Target" sales={operational.ytdTarget.sales} count={operational.ytdTarget.count} />
+          <KpiTile title="MTD Actual" sales={operational.mtdCurrent.sales} count={operational.mtdCurrent.count} />
+          <KpiTile title="MTD Previous Year" sales={operational.mtdPrevious.sales} count={operational.mtdPrevious.count} />
+          <KpiTile title="MTD Target" sales={operational.mtdTarget.sales} count={operational.mtdTarget.count} />
+          <KpiTile
+            title="Latest Sales"
+            sales={operational.latest?.totalSales ?? 0}
+            count={operational.latest?.totalCount ?? 0}
+            note={formatDate(operational.latest?.date ?? null)}
           />
         </div>
       </section>
 
-      <section className="section-block">
-        <div className="section-heading">
+      <section className="filter-panel">
+        <div className="filter-panel-title">
           <div>
-            <p className="eyebrow">Selected month</p>
-            <h2>{snapshot.month} {snapshot.year}</h2>
+            <p className="eyebrow">Analysis filters</p>
+            <h2>Choose one or multiple values</h2>
           </div>
-          <p>For DSR-linked months, actuals reflect all entered daily records up to the latest active DSR date.</p>
+          <button
+            type="button"
+            className="clear-button"
+            onClick={() => {
+              setBranches([...data.branches]);
+              setYears([...data.years]);
+              setMonths([...data.months]);
+            }}
+          >
+            Select all
+          </button>
         </div>
-        <div className="metrics-grid metrics-grid-four">
-          <MetricCard
-            title={snapshot.dataThrough ? `${snapshot.month} Actual / MTD` : `${snapshot.month} Actual`}
-            pair={snapshot.monthMetrics.current}
-            accent
-            note={snapshot.dataThrough ? `Through ${formatDate(snapshot.dataThrough)}` : undefined}
-          />
-          <MetricCard title={`${snapshot.month} ${snapshot.year - 1}`} pair={snapshot.monthMetrics.previous} />
-          <MetricCard title={`${snapshot.month} ${snapshot.year} Target`} pair={snapshot.monthMetrics.target} />
-          <AchievementCard
-            title="Month Achievement"
-            salesPct={snapshot.achievement.monthSalesPct}
-            countPct={snapshot.achievement.monthCountPct}
-          />
+        <div className="filter-grid-three">
+          <MultiSelect label="Branch" values={branches} options={data.branches} onChange={setBranches} />
+          <MultiSelect label="Year" values={years} options={data.years} onChange={setYears} />
+          <MultiSelect label="Month" values={months} options={data.months} onChange={setMonths} />
         </div>
       </section>
 
-      <section className="section-block split-section">
-        <div className="latest-card">
-          <p className="eyebrow">Latest sales</p>
-          <h2>{formatDate(snapshot.latestSale.date)}</h2>
-          <div className="latest-values">
-            <div>
-              <span>Sales</span>
-              <strong>{formatInr(snapshot.latestSale.sales)}</strong>
-            </div>
-            <div>
-              <span>Transactions</span>
-              <strong>{formatCount(snapshot.latestSale.count)}</strong>
-            </div>
-          </div>
-          <p className="latest-footnote">
-            Uses the latest DSR date with non-zero Sales or Count activity, rather than simply using yesterday.
-          </p>
-        </div>
-
-        <div className="summary-card">
-          <p className="eyebrow">Data logic</p>
-          <h2>How this view is calculated</h2>
-          <ul>
-            <li>2025 Sales and Count are fixed monthly historical values.</li>
-            <li>2026 Sales and Count targets are fixed monthly target values.</li>
-            <li>Jan–Aug 2026 actuals use the monthly aggregate stored in the branch sheet.</li>
-            <li>Sep 2026 onward uses daily records from the respective branch DSR whenever activity exists.</li>
-          </ul>
-        </div>
+      <section className="analysis-summary-grid">
+        <article className="analysis-card accent-card">
+          <span>Selected Actual</span>
+          <strong>{formatInr(selected.actual.sales)}</strong>
+          <small>{formatCount(selected.actual.count)} transactions</small>
+        </article>
+        <article className="analysis-card">
+          <span>Previous Year</span>
+          <strong>{formatInr(selected.previous.sales)}</strong>
+          <small>{formatCount(selected.previous.count)} transactions</small>
+        </article>
+        <article className="analysis-card">
+          <span>Target</span>
+          <strong>{formatInr(selected.target.sales)}</strong>
+          <small>{formatCount(selected.target.count)} target transactions</small>
+        </article>
+        <article className="analysis-card">
+          <span>Sales Achievement</span>
+          <strong>{formatPct(selected.salesAchievement)}</strong>
+          <small>Count achievement {formatPct(selected.countAchievement)}</small>
+        </article>
       </section>
 
-      <section className="section-block">
+      <section className="section-block compact-section">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">Service mix</p>
-            <h2>{snapshot.month} Performance by Service</h2>
+            <p className="eyebrow">Filtered service view</p>
+            <h2>Service Performance</h2>
           </div>
-          <p>All values are shown in INR.</p>
+          <p>{branches.join(", ")} · {years.join(", ")} · {months.join(", ")}</p>
         </div>
         <div className="table-wrap">
           <table>
@@ -229,14 +278,14 @@ export default function DashboardClient({ data }: { data: DashboardData }) {
                 <th>Service</th>
                 <th>Actual Sales</th>
                 <th>Actual Count</th>
-                <th>{snapshot.year - 1} Sales</th>
-                <th>{snapshot.year - 1} Count</th>
+                <th>Previous Sales</th>
+                <th>Previous Count</th>
                 <th>Target Sales</th>
                 <th>Target Count</th>
               </tr>
             </thead>
             <tbody>
-              {snapshot.services.map((service) => (
+              {selected.services.map((service) => (
                 <tr key={service.service}>
                   <td className="service-name">{service.service}</td>
                   <td>{formatInr(service.actualSales)}</td>
